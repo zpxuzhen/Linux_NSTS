@@ -70,7 +70,7 @@ void download(int sockfd)
 	//(2.3).创建文件
 	fd = open(filename,O_RDWR | O_CREAT | O_TRUNC, 0664);
 	//(3).接收文件长度
-    n = read(sockfd,&file_len,4);
+	n = read(sockfd,&file_len,4);
 	//(4).接收文件内容
 	while((n = read(sockfd,buf,N)) > 0)
 	{
