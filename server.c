@@ -19,8 +19,8 @@ void updata(int connfd)
 	long int file_len;
 
 	n = read(connfd,&buf[0],1);
-	n = read(connfd,filename,buf[0]);		
-    n = read(connfd,&file_len,4); 
+	n = read(connfd,filename,buf[0]);
+	n = read(connfd,&file_len,4); 
 	fd = open(filename,O_RDWR | O_CREAT | O_TRUNC, 0664);
 	
 	while((n = read(connfd,buf,N)) > 0)
@@ -29,7 +29,7 @@ void updata(int connfd)
 		printf(".");
 		fflush(NULL);
 		file_len -= n; 
-		if(file_len == 0)
+		if(file_len <= 0)
 			break;
 	}
 	printf("\n");

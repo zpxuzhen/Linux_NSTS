@@ -48,7 +48,6 @@ void updata(int sockfd)
 	}
 	printf("\n");
 	printf("上传成功...\n");
-err:
 	close(fd);
 }
 void download(int sockfd)
@@ -79,12 +78,11 @@ void download(int sockfd)
 		printf(".");
 		fflush(NULL);
 		file_len -= n;
-		if(file_len == 0)
+		if(file_len <= 0)
 			break;
 	}
 	printf("\n");
 	printf("下载成功...\n");
-err:
 	close(fd);
 }
 void menu(int sockfd)
@@ -150,12 +148,8 @@ int main(int argc, const char *argv[])
 		perror("fail to connect");
 		return -1;
 	}
-#if 1
 	//2.实现上传和下载的菜单
 	menu(sockfd);
-#else
-	printf("**************************\n");
-#endif	
 	//3.关闭连接
 	close(sockfd);
 
