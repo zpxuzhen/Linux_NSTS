@@ -9,51 +9,182 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <errno.h>
+#include <pthread.h>
 
 #define N 1024
 
 #define logs(n,buf)	if (n < 0) \
-		printf("消息'%s'发送失败！错误代码是%d，错误信息是'%s'\n", \
-				buf, errno, strerror(errno)); \
-		else \
-		printf("消息'%s'发送成功，共发送了%d个字节！\n", \
-				buf, n)
+	printf("消息'%s'发送失败！错误代码是%d，错误信息是'%s'\n", \
+			buf, errno, strerror(errno)); \
+else \
+printf("消息'%s'发送成功，共发送了%d个字节！\n", \
+		buf, n)
 
 #define logr(n,buf)	if (n > 0) \
 	printf("接收消息成功:'%s'，共%d个字节的数据\n", \
-			buf, n); \
-		else \
-		printf("消息接收失败！错误代码是%d，错误信息是'%s'\n", \
-				errno, strerror(errno))
+			buf, n)
 
-char buf[N + 1] = {0};
-char filename[64] = {0};
-unsigned int n;
+SSL_CTX *ctx;
 
-void updata(SSL * ssl)
+typedef struct {
+	unsigned int n;
+	int connfd;
+	struct sockaddr_in clientaddr;
+	char buf[N + 1];
+	char filename[64];
+	int err_count;
+} Data;
+
+typedef struct task 
+{ 
+	void *(*process) (Data * d); 
+	Data * d;
+	struct task *next; 
+} Cthread_task; 
+
+/*线程池结构*/ 
+typedef struct 
+{ 
+	pthread_mutex_t queue_lock; 
+	pthread_cond_t queue_ready; 
+
+	/*链表结构，线程池中所有等待任务*/ 
+	Cthread_task *queue_head; 
+
+	/*是否销毁线程池*/ 
+	int shutdown; 
+	pthread_t *threadid; 
+
+	/*线程池中线程数目*/ 
+	int max_thread_num; 
+
+	/*当前等待的任务数*/ 
+	int cur_task_size; 
+
+} Cthread_pool; 
+
+Cthread_pool *pool = NULL; 
+
+void * thread_routine (void *arg) 
+{ 
+	printf ("starting thread %#lx\n", pthread_self ()); 
+	while (1) 
+	{ 
+		pthread_mutex_lock (&(pool->queue_lock)); 
+
+		while (pool->cur_task_size == 0 && !pool->shutdown) 
+		{ 
+			printf ("thread %#lx is waiting\n", pthread_self ()); 
+			pthread_cond_wait (&(pool->queue_ready), &(pool->queue_lock)); 
+		} 
+
+		/*线程池要销毁了*/ 
+		if (pool->shutdown) 
+		{ 
+			/*遇到break,continue,return等跳转语句，千万不要忘记先解锁*/ 
+			pthread_mutex_unlock (&(pool->queue_lock)); 
+			printf ("thread %#lx will exit\n", pthread_self ()); 
+			pthread_exit (NULL); 
+		} 
+
+		printf ("thread %#lx is starting to work\n", pthread_self ()); 
+
+
+		/*待处理任务减1，并取出链表中的头元素*/ 
+		pool->cur_task_size--; 
+		Cthread_task *task = pool->queue_head; 
+		pool->queue_head = task->next; 
+		pthread_mutex_unlock (&(pool->queue_lock)); 
+
+		/*调用回调函数，执行任务*/ 
+		(*(task->process)) (task->d); 
+		free (task); 
+		task = NULL; 
+	} 
+	/*这一句应该是不可达的*/ 
+	pthread_exit (NULL); 
+}
+
+void pool_init (int max_thread_num) 
+{ 
+	int i = 0;
+
+	pool = (Cthread_pool *) malloc (sizeof (Cthread_pool)); 
+
+	pthread_mutex_init (&(pool->queue_lock), NULL); 
+	/*初始化条件变量*/
+	pthread_cond_init (&(pool->queue_ready), NULL); 
+
+	pool->queue_head = NULL; 
+
+	pool->max_thread_num = max_thread_num; 
+	pool->cur_task_size = 0; 
+
+	pool->shutdown = 0; 
+
+	pool->threadid = (pthread_t *) malloc (max_thread_num * sizeof (pthread_t)); 
+
+	for (i = 0; i < max_thread_num; i++) 
+	{  
+		pthread_create (&(pool->threadid[i]), NULL, thread_routine, NULL); 
+	} 
+} 
+
+int pool_add_task (void *(*process) (Data * d), Data * d) 
+{ 
+	/*构造一个新任务*/ 
+	Cthread_task *task = (Cthread_task *) malloc (sizeof (Cthread_task)); 
+	task->process = process; 
+	task->d = d; 
+	task->next = NULL;
+
+	pthread_mutex_lock (&(pool->queue_lock)); 
+	/*将任务加入到等待队列中*/ 
+	Cthread_task *member = pool->queue_head; 
+	if (member != NULL) 
+	{ 
+		while (member->next != NULL) 
+			member = member->next; 
+		member->next = task; 
+	} 
+	else 
+	{ 
+		pool->queue_head = task; 
+	} 
+
+	pool->cur_task_size++; 
+	pthread_mutex_unlock (&(pool->queue_lock)); 
+
+	pthread_cond_signal (&(pool->queue_ready)); 
+
+	return 0; 
+} 
+
+
+
+void updata(SSL * ssl,Data * d)
 {
 	int fd;
 	long int file_len;
-uploop:
-	n = SSL_read(ssl,&buf[0],1);
-	printf("文件名长度是: %d\n",buf[0]);
-	n = SSL_read(ssl,filename,buf[0]);
-	logr(n,filename);
-	n = SSL_read(ssl,&file_len,4); 
-	if(file_len <= 0)
-	{
-		printf("文件大小不对，重新等待客户端输入:\n");
-		goto uploop;
-	}
+	d->err_count = 3;
+	d->n = SSL_read(ssl,d->buf,1);
+	if(d->n <= 0) return;
+	printf("文件名长度是: %d\n",d->buf[0]);
+	d->n = SSL_read(ssl,d->filename,d->buf[0]);
+	if(d->n <= 0) return;
+	logr(d->n,d->filename);
+	d->n = SSL_read(ssl,&file_len,4); 
+	if(d->n <= 0) return;
+	if(file_len <= 0) return;
 	printf("文件大小是: %ld\n",file_len);
 
-	fd = open(filename,O_RDWR | O_CREAT | O_TRUNC, 0664);
-	while((n = SSL_read(ssl,buf,N)) > 0)
+	fd = open(d->filename,O_RDWR | O_CREAT | O_TRUNC, 0664);
+	while((d->n = SSL_read(ssl,d->buf,N)) > 0)
 	{
-		write(fd,buf,n);
+		write(fd,d->buf,d->n);
 		printf(".");
 		fflush(NULL);
-		file_len -= n; 
+		file_len -= d->n; 
 		if(file_len <= 0)
 			break;
 	}
@@ -65,33 +196,38 @@ uploop:
 	close(fd);
 }
 
-void download(SSL * ssl)
+void download(SSL * ssl,Data * d)
 {
 	int fd;
 	struct stat st;
 	long int file_len;
+	d->err_count = 3;
 dloop:
-	n = SSL_read(ssl,&buf[0],1);
-	printf("文件名长度是: %d\n",buf[0]);
-	n = SSL_read(ssl,filename,buf[0]);
-	logr(n,filename);
-	stat(filename,&st);
+	d->n = SSL_read(ssl,d->buf,1);
+	if(d->n <= 0) return;
+	printf("文件名长度是: %d\n",d->buf[0]);
+	d->n = SSL_read(ssl,d->filename,d->buf[0]);
+	logr(d->n,d->filename);
+	if(d->n <= 0) return;
+	stat(d->filename,&st);
 	file_len = st.st_size;
-	n = SSL_write(ssl,&file_len,4);
+	d->n = SSL_write(ssl,&file_len,4);
 	if(file_len <= 0)
 	{
+		d->err_count--;
+		if(d->err_count < 0) return;
 		printf("文件大小不对，重新等待客户端输入:\n");
 		goto dloop;
 	}
 	printf("文件大小是: %ld\n",file_len);
 
-	fd = open(filename,O_RDONLY);
-	while((n = read(fd,buf,N)) > 0)
+	fd = open(d->filename,O_RDONLY);
+	while((d->n = read(fd,d->buf,N)) > 0)
 	{
-		SSL_write(ssl,buf,n);
+		SSL_write(ssl,d->buf,d->n);
 		printf(".");
 		fflush(NULL);
-		file_len -= n;
+		file_len -= d->n;
 		if(file_len <= 0)
 			break;
 	}
@@ -104,32 +240,77 @@ dloop:
 	close(fd);
 }
 
-void handler(char cmd,SSL * ssl)
+void handler(char cmd,SSL * ssl,Data * d)
 {
 	switch(cmd)
 	{
 	case 'U':
 		printf("正在从客户端上传...\n");
-		updata(ssl);
+		updata(ssl,d);
 		break;
 	case 'D':
 		printf("正在从服务器下载\n");
-		download(ssl);
+		download(ssl,d);
 		break;
 	default:
 		printf("接收的命令有误!\n");
 	}
-	bzero(buf,N+1); 
-	bzero(filename,64); 
+	bzero(d,sizeof(Data)); 
+}
+
+void * process (Data * d) 
+{ 
+	SSL *ssl;
+
+	printf("server: got connection from %s, port %d, socket %d\n",
+			(char *)inet_ntoa(d->clientaddr.sin_addr),
+			ntohs(d->clientaddr.sin_port), d->connfd);
+
+	/* 基于 ctx 产生一个新的 SSL */
+	ssl = SSL_new(ctx);
+	/* 将连接用户的 socket 加入到 SSL */
+	SSL_set_fd(ssl, d->connfd);
+	/* 建立 SSL 连接 */
+	if (SSL_accept(ssl) == -1) {
+		perror("accept");
+		goto fail;
+	}
+	//2.响应客户端的请求
+	while(1)  //----->while(1)可以响应一个客户端的多次请求
+	{	
+		/* 开始处理每个新连接上的数据收发 */
+		//(1).读取命令
+		bzero(d->buf,N + 1);
+		d->n = SSL_read(ssl, &(d->buf), 1);
+		logr(d->n,d->buf);
+		if (d->n != 1)
+			break;
+		//(2).执行命令
+		if(d->buf[0] == 'Q')
+			goto finish;
+		else
+			handler(d->buf[0],ssl,d);
+	}
+	/* 处理每个新连接上的数据收发结束 */
+finish:
+	/* 关闭 SSL 连接 */
+	SSL_shutdown(ssl);
+	/* 释放 SSL */
+	SSL_free(ssl);
+fail:
+	/* 关闭 socket */
+	close(d->connfd);
+	printf("客户端退出!\n");
+
+	return NULL; 
 }
 
 int main(int argc, const char *argv[])
 {
 	int sockfd, connfd;
-	struct sockaddr_in  serveraddr, clientaddr;
+	struct sockaddr_in  serveraddr;
 	socklen_t addrlen;
 	unsigned int n, myport, lisnum = 5;
-	SSL_CTX *ctx;
 
 	if(argc < 3)
 	{
@@ -204,58 +385,28 @@ int main(int argc, const char *argv[])
 	} else
 		printf("begin listen\n");
 
-	addrlen = sizeof(clientaddr);
+	addrlen = sizeof(struct sockaddr_in);
+
+	//p1. 初始化线程池
+	pool_init(5);
 
 	while(1)  //----->while(1)可以响应多个客户端
 	{	
-		SSL *ssl;
-
-		connfd = accept(sockfd, (struct sockaddr *)&clientaddr, &addrlen);
-		if(connfd == -1)
+		Data * d = malloc(sizeof(Data));
+		if(d == NULL)
+		{
+			perror("malloc");
+			exit(errno);
+		}
+		bzero(d,sizeof(Data));
+		d->connfd = accept(sockfd, (struct sockaddr *)&(d->clientaddr), &addrlen);
+		if(d->connfd == -1)
 		{
 			perror("fail to accept");
 			exit(errno);
-		} else
-			printf("server: got connection from %s, port %d, socket %d\n",
-					(char *)inet_ntoa(clientaddr.sin_addr),
-					ntohs(clientaddr.sin_port), connfd);
-
-		/* 基于 ctx 产生一个新的 SSL */
-		ssl = SSL_new(ctx);
-		/* 将连接用户的 socket 加入到 SSL */
-		SSL_set_fd(ssl, connfd);
-		/* 建立 SSL 连接 */
-		if (SSL_accept(ssl) == -1) {
-			perror("accept");
-			close(connfd);
-			break;
 		}
-
-		//2.响应客户端的请求
-		while(1)  //----->while(1)可以响应一个客户端的多次请求
-		{	
-			/* 开始处理每个新连接上的数据收发 */
-			//(1).读取命令
-			bzero(buf,N + 1);
-			n = SSL_read(ssl, &buf[0], 1);
-			logr(n,&buf[0]);
-			if (n != 1)
-				break;
-			//(2).执行命令
-			if(buf[0] == 'Q')
-				goto finish;
-			else
-				handler(buf[0],ssl);
-		}
-		/* 处理每个新连接上的数据收发结束 */
-finish:
-		/* 关闭 SSL 连接 */
-		SSL_shutdown(ssl);
-		/* 释放 SSL */
-		SSL_free(ssl);
-		/* 关闭 socket */
-		close(connfd);
-		printf("客户端退出!\n");
+		//p2. 执行process，将process任务交给线程池
+		pool_add_task(process,d);
 
 	}
 	//3.关闭连接

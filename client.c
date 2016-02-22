@@ -30,6 +30,7 @@
 char buf[N + 1] = {0};
 char filename[64] = {0};
 unsigned int n;
+int err_count = 0;
 
 void ShowCerts(SSL * ssl)
 {
@@ -55,31 +56,35 @@ void updata(SSL * ssl)
 	int fd;
 	struct stat st;
 	long int file_len;
+	err_count = 3;
 
 	//(1).发送上传命令
 	buf[0] = 'U';
 	n = SSL_write(ssl,&buf[0],1);
 	logs(n,&buf[0]);
 uploop:
-	//(2.1).发送文件名长度
 	printf("请输入要上传的文件名:\n");
 	scanf("%s",buf);
 	strcpy(filename,buf);
 	buf[0] = strlen(filename);
+	stat(filename,&st);
+	file_len = st.st_size;
+	if(file_len <= 0)
+	{
+		err_count--;
+		if(err_count <= 0)
+			exit(1);
+		printf("输入的文件名有错！还有%d次输入机会!\n",err_count);
+		goto uploop;
+	}
+	//(2.1).发送文件名长度
 	n = SSL_write(ssl,&buf[0],1);
 	printf("文件名长度是: %d\n",buf[0]);
 	//(2.2).发送文件名
 	n = SSL_write(ssl,filename,buf[0]);
 	logs(n,filename);
 	//(3).发送文件长度
-	stat(filename,&st);
-	file_len = st.st_size;
 	n = SSL_write(ssl,&file_len,4);
-	if(file_len <= 0)
-	{
-		printf("输入的文件名有错！\n");
-		goto uploop;
-	}
 	printf("文件大小是: %ld\n",file_len);
 	//(4).发送文件内容
 	fd = open(filename,O_RDONLY);
@@ -103,17 +108,18 @@ void download(SSL * ssl)
 {
 	int fd;
 	long int file_len;
+	err_count = 3;
 
 	//(1).发送下载命令
 	buf[0] = 'D';
 	n = SSL_write(ssl,&buf[0],1);
 	logs(n,&buf[0]);
 dloop:
-	//(2.1).发送文件名长度
 	printf("请输入要下载的文件名:\n");
 	scanf("%s",buf);
 	strcpy(filename,buf);
 	buf[0] = strlen(filename);
+	//(2.1).发送文件名长度
 	n = SSL_write(ssl,&buf[0],1);
 	printf("文件名长度是: %d\n",buf[0]);
 	//(2.2).发送文件名
@@ -123,7 +129,10 @@ dloop:
 	n = SSL_read(ssl,&file_len,4);
 	if(file_len <= 0)
 	{
-		printf("输入的文件名有错！\n");
+		err_count--;
+		if(err_count <= 0)
+			exit(1);
+		printf("输入的文件名有错！还有%d次输入机会!\n",err_count);
 		goto dloop;
 	}
 	printf("文件大小是: %ld\n",file_len);
