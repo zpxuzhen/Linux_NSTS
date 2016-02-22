@@ -1,5 +1,6 @@
 all:clean
-	make server client
+	sudo ./mk_client.sh 
+	sudo ./mk_server.sh
 clean:
-	rm -rf server client
+	rm -rf ssl_server ssl_client
 
